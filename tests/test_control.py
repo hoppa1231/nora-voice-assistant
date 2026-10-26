@@ -217,3 +217,87 @@ async def test_new_function_reports_coder_errors():
     assistant = Assistant(NoLlm(), ToolRegistry(), Memory(":memory:"), SilentSpeaker(), MSK)
     answer = (await assistant.handle("Допиши функцию, чтобы ты считала калории"))[0]
     assert answer == "Не получилось: нет инструмента ask_coder."
+
+
+@pytest.mark.parametrize(
+    ("text", "command", "only"),
+    [
+        ("Нора, я хочу говорить подольше", "on", True),
+        ("Не перебивай меня, пожалуйста", "on", True),
+        ("Давай не будем перебрасываться, дай договорить", "on", True),
+        ("Включи долгое слушание", "on", False),
+        ("Не перебивай, я расскажу про свой день на работе", "on", False),
+        ("Хватит меня слушать", "off", True),
+        ("Вернись в обычный режим", "off", False),
+        ("Можешь снова перебивать", "off", True),
+        ("Какая погода завтра?", None, False),
+        ("У нас был долгий разговор с мамой", None, False),
+    ],
+)
+def test_long_listening_phrases(text, command, only):
+    from voice_assistant.listening import only_command, parse_command
+
+    assert parse_command(text) == command
+    if command:
+        assert only_command(text) == only
+
+
+def test_long_listening_waits_for_a_long_pause(monkeypatch):
+    import time
+
+    from voice_assistant import listening
+
+    mode = listening.LongListening()
+    assert not mode.active
+    mode.start()
+    assert mode.active and mode.until - time.monotonic() > 590
+    mode.add("Сначала я хочу рассказать,", now=100.0)
+    assert mode.take(False, now=101.0) is None  # a usual pause is not the end
+    mode.add("что было утром.", now=102.0)
+    assert mode.take(True, now=110.0) is None  # still speaking
+    assert mode.take(False, now=102.0 + listening.PAUSE_S) == "Сначала я хочу рассказать, что было утром."
+    assert mode.take(False, now=1000.0) is None
+    mode.stop()
+    assert not mode.active
+
+
+async def test_long_listening_switch_is_decided_in_code():
+    from voice_assistant.listening import STARTED, STOPPED, LongListening
+
+    mode = LongListening()
+    assistant = Assistant(NoLlm(), ToolRegistry(), Memory(":memory:"), SilentSpeaker(), MSK, listening=mode)
+    assert (await assistant.handle("Нора, я хочу говорить подольше"))[0] == STARTED
+    assert mode.active
+    assert (await assistant.handle("Хватит меня слушать"))[0] == STOPPED
+    assert not mode.active
+
+
+async def test_long_listening_inside_a_request_still_asks_the_model():
+    from voice_assistant.listening import LongListening
+    from voice_assistant.llm import Reply
+
+    class OkLlm:
+        async def complete(self, messages, tools, on_text, require_tool=False):
+            on_text("Слушаю.")
+            return Reply("Слушаю.")
+
+    mode = LongListening()
+    assistant = Assistant(OkLlm(), ToolRegistry(), Memory(":memory:"), SilentSpeaker(), MSK, listening=mode)
+    assert (await assistant.handle("Не перебивай, я расскажу про свой день на работе"))[0] == "Слушаю."
+    assert mode.active
+
+
+async def test_long_listening_tool():
+    async with httpx.AsyncClient() as http:
+        ctx = ToolContext(Memory(":memory:"), http, MSK, "")
+        reg = build_tools(ctx)
+    result = await reg.call("long_listening", '{"on": true}')
+    assert result.final and ctx.listening.active
+    await reg.call("long_listening", '{"on": false}')
+    assert not ctx.listening.active
+
+
+def test_main_module_imports():
+    import voice_assistant.__main__ as main
+
+    assert main.parse_command("не перебивай") == "on"

@@ -17,6 +17,7 @@ from .assistant import Assistant, TurnStats
 from .audio import Microphone, Player, SpeechSegmenter, WavMicrophone, chime
 from .config import Config, load_config
 from .indicator import Indicator
+from .listening import parse_command
 from .llm import ContextOverflow, LlmClient
 from .memory import Memory
 from .scheduler import AlarmScheduler
@@ -129,7 +130,9 @@ async def run(cfg: Config, args: argparse.Namespace) -> None:
         history_messages=cfg.history_messages,
         max_tool_steps=cfg.llm.max_tool_steps,
         pending=ctx.pending,
+        listening=ctx.listening,
     )
+    listening = ctx.listening
     alarms = asyncio.create_task(AlarmScheduler(memory, speaker, tz).run())
     if not args.once:
         asyncio.create_task(assistant.warm_up())
@@ -193,21 +196,40 @@ async def run(cfg: Config, args: argparse.Namespace) -> None:
                 print(f"Слушаю. Обращайся по имени: «{cfg.wake_word.capitalize()}, …»; Ctrl+C — выход.\n", flush=True)
             else:
                 print("Слушаю. Говори; Ctrl+C — выход.\n", flush=True)
+
+            async def answer(request: str, heard_at: float, stt_s: float | None) -> None:
+                nonlocal busy, hearing, listen_until
+                busy, hearing = True, False
+                update_mic()
+                try:
+                    await respond(request, heard_at, stt_s)
+                    listen_until = max(time.monotonic() + cfg.wake_followup_s, listening.until)
+                finally:
+                    busy = False
+                    update_mic()
+
             while True:
                 try:
                     frame = await asyncio.wait_for(mic.queue.get(), timeout=0.5)
                 except TimeoutError:
+                    frame = None
                     if isinstance(mic, WavMicrophone) and mic.finished.is_set():
+                        if collected := listening.take(False, now=float("inf")):
+                            await answer(collected, time.monotonic(), None)
                         break
-                    continue
-                utterance = segmenter.process(frame)
+                utterance = segmenter.process(frame) if frame is not None else None
                 if hearing != segmenter.active:
                     hearing = segmenter.active
                     refresh_indicator()
                 if utterance is None:
+                    # Long listening: the phrases so far are answered only after a long silence.
+                    if collected := listening.take(segmenter.active):
+                        await answer(collected, time.monotonic(), None)
                     continue
                 heard_at = time.monotonic()
-                busy = hearing = True
+                patient = listening.active or listening.collecting  # keep the microphone on: the next phrase may follow at once
+                busy = not patient
+                hearing = True
                 update_mic()
                 try:
                     text = await asyncio.to_thread(transcriber.transcribe, utterance)
@@ -216,6 +238,17 @@ async def run(cfg: Config, args: argparse.Namespace) -> None:
                         log.debug("ignored %r (%.1fs of audio)", text, len(utterance) / 16000)
                         continue
                     request = text
+                    if patient:
+                        if cfg.wake_word:
+                            request = find_wake_word(text, cfg.wake_word)
+                            request = text if request is None else request
+                        print(f"Ты: {text}", flush=True)
+                        if len(request) < cfg.stt.min_chars:  # just the name
+                            continue
+                        listening.add(request)
+                        if parse_command(request) == "off":  # «обычный режим» is answered at once
+                            await answer(listening.take(False, now=float("inf")) or request, heard_at, stt_s)
+                        continue
                     if cfg.wake_word and heard_at > listen_until:
                         request = find_wake_word(text, cfg.wake_word)
                         if request is None:
@@ -231,9 +264,7 @@ async def run(cfg: Config, args: argparse.Namespace) -> None:
                     elif cfg.wake_word:
                         request = find_wake_word(text, cfg.wake_word) or text  # the name is fine here too
                     print(f"Ты: {text}", flush=True)
-                    hearing = False
-                    await respond(request, heard_at, stt_s)
-                    listen_until = time.monotonic() + cfg.wake_followup_s
+                    await answer(request, heard_at, stt_s)
                 finally:
                     busy = hearing = False
                     update_mic()

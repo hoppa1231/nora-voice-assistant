@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from ..listening import LongListening
 from ..memory import Memory
 
 log = logging.getLogger("va.tools")
@@ -66,6 +67,7 @@ class ToolContext:
     pending: PendingActions = field(default_factory=PendingActions)
     announce: Callable[[str], None] = _announce_nowhere  # speak later, e.g. when a background task ends
     activity: set[str] = field(default_factory=set)  # running background jobs, shown on screen
+    listening: LongListening = field(default_factory=LongListening)  # «не перебивай»: up to 10 min without the name
 
 
 @dataclass
@@ -140,9 +142,9 @@ class ToolRegistry:
 
 
 def build_tools(ctx: ToolContext) -> ToolRegistry:
-    from . import alarms, coder, computer, media, memory_tools, weather, web
+    from . import alarms, coder, computer, listening, media, memory_tools, weather, web
 
     registry = ToolRegistry()
-    for module in (alarms, memory_tools, web, weather, media, computer, coder):
+    for module in (alarms, memory_tools, web, weather, media, computer, coder, listening):
         module.register(registry, ctx)
     return registry

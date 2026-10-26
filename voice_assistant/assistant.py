@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from .listening import STARTED, STOPPED, LongListening, only_command, parse_command
 from .llm import ContextOverflow, LlmClient
 from .memory import Memory
 from .prompts import build_system_prompt, build_turn_context
@@ -56,6 +57,7 @@ class Assistant:
         history_messages: int = 10,
         max_tool_steps: int = 6,
         pending: PendingActions | None = None,
+        listening: LongListening | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tools
@@ -70,6 +72,7 @@ class Assistant:
         self._background: set[asyncio.Task] = set()
         self._pending = pending or PendingActions()
         self._skill = SkillDialogue()
+        self._listening = listening or LongListening()
 
     @property
     def _history(self) -> list[dict]:
@@ -124,6 +127,21 @@ class Assistant:
             return "Не получилось: " + result.text.removeprefix("Ошибка: ")
         return result.text
 
+    def _switch_listening(self, user_text: str) -> str | None:
+        """«Не перебивай» / «обычный режим». The mode is switched even inside a longer request;
+        only a bare switch is answered here, anything else still goes to the model."""
+        command = parse_command(user_text)
+        if command is None:
+            return None
+        if command == "on":
+            self._listening.start()
+        else:
+            self._listening.stop()
+        log.info("long listening %s", command)
+        if not only_command(user_text):
+            return None
+        return STARTED if command == "on" else STOPPED
+
     def _system_prompt(self) -> str:
         return build_system_prompt(self._memory.facts(), self._memory.routines(), self._default_city)
 
@@ -152,6 +170,8 @@ class Assistant:
         confirmed = await self._confirm(user_text)
         if confirmed is None:
             confirmed = await self._new_function(user_text)
+        if confirmed is None:
+            confirmed = self._switch_listening(user_text)
         if confirmed is not None:
             self._speaker.feed(confirmed)
             self._speaker.end_of_text()
