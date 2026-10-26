@@ -15,6 +15,7 @@ from .llm import ContextOverflow, LlmClient
 from .memory import Memory
 from .prompts import build_system_prompt, build_turn_context
 from .routines import learn_routine, match_routine, routine_hint
+from .skills import SkillDialogue, build_task, parse_request
 from .speech import SilentSpeaker, Speaker
 from .tools import PendingActions, ToolRegistry
 
@@ -68,6 +69,7 @@ class Assistant:
         self._cached_system: str | None = None
         self._background: set[asyncio.Task] = set()
         self._pending = pending or PendingActions()
+        self._skill = SkillDialogue()
 
     @property
     def _history(self) -> list[dict]:
@@ -102,6 +104,26 @@ class Assistant:
         log.info("pending action dropped: %s", action.description)
         return None  # any other request cancels the question and is handled normally
 
+    async def _new_function(self, user_text: str) -> str | None:
+        """«Допиши функцию» / «сделай так»: ask for details, then hand the task to ask_coder.
+        None if the phrase is not part of this dialogue."""
+        request = self._skill.take()
+        if request is not None:
+            if NO.search(user_text):
+                return "Хорошо, не буду."
+            task = build_task(request, user_text)
+        else:
+            request = parse_request(user_text)
+            if request is None:
+                return None
+            if not request:
+                return self._skill.ask(user_text)
+            task = build_task(request)
+        result = await self._tools.call("ask_coder", json.dumps({"task": task, "mode": "change"}, ensure_ascii=False))
+        if not result.ok:
+            return "Не получилось: " + result.text.removeprefix("Ошибка: ")
+        return result.text
+
     def _system_prompt(self) -> str:
         return build_system_prompt(self._memory.facts(), self._memory.routines(), self._default_city)
 
@@ -128,6 +150,8 @@ class Assistant:
         started = time.monotonic()
         stats = TurnStats()
         confirmed = await self._confirm(user_text)
+        if confirmed is None:
+            confirmed = await self._new_function(user_text)
         if confirmed is not None:
             self._speaker.feed(confirmed)
             self._speaker.end_of_text()

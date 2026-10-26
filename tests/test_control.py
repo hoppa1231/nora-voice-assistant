@@ -144,3 +144,76 @@ async def test_context_overflow_drops_history():
     assistant._turns = [[{"role": "user", "content": "старое"}, {"role": "assistant", "content": "старое"}]]
     assert (await assistant.handle("привет"))[0] == "Ок."
     assert len(assistant._turns) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "request_text"),
+    [
+        ("Допиши функцию", ""),
+        ("Нора, сделай так", ""),
+        ("Сделай так, пожалуйста.", ""),
+        ("Добавь себе новую функцию", ""),
+        ("Допиши функцию, чтобы ты говорила курс доллара", "Допиши функцию, чтобы ты говорила курс доллара"),
+        ("Сделай так, чтобы ты умела читать новости", "Сделай так, чтобы ты умела читать новости"),
+        ("Сделай так же", None),
+        ("Сделай так, чтобы было погромче", None),
+        ("Сделай погромче", None),
+        ("Какая функция у печени?", None),
+    ],
+)
+def test_new_function_requests(text, request_text):
+    from voice_assistant.skills import parse_request
+
+    assert parse_request(text) == request_text
+
+
+def fake_coder() -> tuple[ToolRegistry, list[str]]:
+    reg, tasks = ToolRegistry(), []
+
+    @reg.tool("x", final=True)
+    def ask_coder(task: str, mode: str) -> str:
+        assert mode == "change"
+        tasks.append(task)
+        return "Поручить Клоду? Подтверди: скажи «да» или «нет»."
+
+    return reg, tasks
+
+
+async def test_new_function_asks_details_first():
+    from voice_assistant.skills import ASK_DETAILS
+
+    reg, tasks = fake_coder()
+    assistant = Assistant(NoLlm(), reg, Memory(":memory:"), SilentSpeaker(), MSK)
+    assert (await assistant.handle("Допиши функцию"))[0] == ASK_DETAILS
+    answer = (await assistant.handle("Пусть по утрам говорит, сколько дней до выходных"))[0]
+    assert answer.endswith("Подтверди: скажи «да» или «нет».")
+    assert tasks[0].startswith("Допиши функцию: Пусть по утрам говорит, сколько дней до выходных.")
+    assert "простая и понятная" in tasks[0]
+
+    assert (await assistant.handle("Сделай так"))[0] == ASK_DETAILS
+    assert (await assistant.handle("Нет, не надо"))[0] == "Хорошо, не буду."
+    await assistant.handle("Допиши функцию, чтобы ты считала калории")
+    assert len(tasks) == 2 and tasks[1].startswith("Допиши функцию, чтобы ты считала калории.")
+
+
+async def test_new_function_question_expires(monkeypatch):
+    from voice_assistant import skills
+
+    class OkLlm:
+        async def complete(self, messages, tools, on_text, require_tool=False):
+            from voice_assistant.llm import Reply
+
+            on_text("Ок.")
+            return Reply("Ок.")
+
+    reg, tasks = fake_coder()
+    assistant = Assistant(OkLlm(), reg, Memory(":memory:"), SilentSpeaker(), MSK)
+    await assistant.handle("Допиши функцию")
+    monkeypatch.setattr(skills, "TTL_S", -1)
+    assert (await assistant.handle("Какая погода?"))[0] == "Ок." and not tasks
+
+
+async def test_new_function_reports_coder_errors():
+    assistant = Assistant(NoLlm(), ToolRegistry(), Memory(":memory:"), SilentSpeaker(), MSK)
+    answer = (await assistant.handle("Допиши функцию, чтобы ты считала калории"))[0]
+    assert answer == "Не получилось: нет инструмента ask_coder."
