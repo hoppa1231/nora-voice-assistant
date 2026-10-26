@@ -1,0 +1,1 @@
+"""Local Russian voice assistant."""
