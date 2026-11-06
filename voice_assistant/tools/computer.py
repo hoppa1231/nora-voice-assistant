@@ -115,7 +115,13 @@ async def run(*cmd: str, timeout: float = 5) -> str:
     if shutil.which(cmd[0]) is None:
         raise ToolError(f"не установлен {cmd[0]}")
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise
     if proc.returncode != 0:
         raise ToolError((err or out).decode().strip() or f"{cmd[0]} завершился с кодом {proc.returncode}")
     return out.decode().strip()

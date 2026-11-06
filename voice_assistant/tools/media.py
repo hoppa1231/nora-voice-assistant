@@ -16,7 +16,13 @@ async def run(*cmd: str) -> str:
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except FileNotFoundError as error:
         raise ToolError(f"не установлен {cmd[0]}") from error
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise
     if proc.returncode != 0:
         message = (err or out).decode().strip()
         if "No players found" in message:

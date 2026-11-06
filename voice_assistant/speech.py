@@ -8,6 +8,7 @@ out roughly one sentence after the model starts answering, not after it ends.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -108,6 +109,9 @@ class Speaker:
         self._idle.set()
         self._worker: asyncio.Task | None = None
         self.first_audio_at: float | None = None
+        self.recent_text = ""  # what is being said now: the microphone hears it too (echo filter)
+        self._generation = 0  # bumped by interrupt(): audio from before it is never played
+        self._current: asyncio.Future | None = None
 
     @property
     def speaking(self) -> bool:
@@ -116,9 +120,18 @@ class Speaker:
     def start(self) -> None:
         self._worker = asyncio.create_task(self._run())
 
+    def set_player(self, player: Player) -> None:
+        """Select an output route during startup, before any queued speech."""
+        if self.speaking:
+            raise RuntimeError("cannot change audio route during playback")
+        self._player = player
+
     async def close(self) -> None:
+        self.interrupt()
         if self._worker:
             self._worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._worker
 
     def feed(self, text: str) -> None:
         for sentence in self._splitter.feed(text):
@@ -140,13 +153,25 @@ class Speaker:
     async def wait_done(self) -> None:
         await self._idle.wait()
 
+    def interrupt(self) -> None:
+        """Stop talking at once: drop queued sentences and cut the one playing."""
+        self._generation += 1
+        self._splitter = SentenceSplitter()
+        if self._current is not None and not self._current.done():
+            self._current.cancel()
+        while not self._queue.empty():
+            self._queue.get_nowait().cancel()
+        self._player.stop()
+
     def _enqueue_text(self, sentence: str) -> None:
         sentence = clean_for_speech(sentence)
         if sentence:
             self._enqueue(asyncio.create_task(self._synthesize(sentence)))
+            self.recent_text = f"{self.recent_text} {sentence}"[-2000:]
 
     def _enqueue(self, item: asyncio.Future[Audio | None]) -> None:
         if self._idle.is_set():
+            self.recent_text = ""
             self._idle.clear()
             if self._on_speaking:
                 self._on_speaking(True)
@@ -166,8 +191,17 @@ class Speaker:
     async def _run(self) -> None:
         while True:
             item = await self._queue.get()
+            self._current = item
+            generation = self._generation
             try:
-                audio = await item
+                try:
+                    audio = await item
+                except asyncio.CancelledError:
+                    if not item.cancelled() or asyncio.current_task().cancelling():
+                        raise
+                    audio = None  # dropped by interrupt()
+                if generation != self._generation:
+                    audio = None  # interrupted while this sentence was being synthesized
                 if audio is not None:
                     if self.first_audio_at is None:
                         self.first_audio_at = time.monotonic()
@@ -175,6 +209,7 @@ class Speaker:
             except Exception:
                 log.exception("playback failed")
             finally:
+                self._current = None
                 if self._queue.empty():
                     self._idle.set()
                     if self._on_speaking:
@@ -186,11 +221,13 @@ class SilentSpeaker:
 
     speaking = False
     first_audio_at: float | None = None
+    recent_text = ""
 
     def start(self) -> None: ...
     async def close(self) -> None: ...
     def feed(self, text: str) -> None: ...
     def end_of_text(self) -> None: ...
     def say(self, text: str) -> None: ...
+    def interrupt(self) -> None: ...
     def play_sound(self, audio: np.ndarray, sample_rate: int) -> None: ...
     async def wait_done(self) -> None: ...

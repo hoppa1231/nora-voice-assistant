@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from . import ToolContext, ToolError, ToolRegistry
+from ..memory_rules import fact_key, explicit_memory_request
 
 
 def register(reg: ToolRegistry, ctx: ToolContext) -> None:
@@ -13,8 +14,29 @@ def register(reg: ToolRegistry, ctx: ToolContext) -> None:
         final=True,
     )
     def remember(fact: str) -> str:
-        ctx.memory.add_fact(fact)
+        if reg.user_text is not None and not reg.memory_save_allowed and not explicit_memory_request(reg.user_text):
+            raise ToolError("самостоятельная память обрабатывается отдельными правилами; явной просьбы запомнить не было")
+        key = fact_key(fact)
+        old = [f for f in ctx.memory.facts(limit=-1) if key and fact_key(f.text) == key]
+        if len(old) == 1 and old[0].text != fact.strip():
+            ctx.memory.update_fact(old[0].id, fact, key=key)
+            return "Запись в памяти обновлена."
+        ctx.memory.add_fact(fact, key=key)
         return "Запомнила."
+
+    @reg.tool("Перезаписать существующий факт, сохранив его номер. Только по просьбе пользователя; при неоднозначности уточни номер.",
+              {"fact_id": {"type": "integer"}, "fact": {"type": "string"}}, required=("fact_id", "fact"), final=True)
+    def update_fact(fact_id: int, fact: str) -> str:
+        if reg.user_text is not None and not reg.memory_edit_allowed:
+            raise ToolError("перезапись факта разрешена только по просьбе пользователя")
+        if not ctx.memory.update_fact(fact_id, fact, key=fact_key(fact)):
+            raise ToolError(f"нет факта #{fact_id}")
+        return "Запись в памяти обновлена."
+
+    @reg.tool("Показать сохранённые факты с номерами для просмотра, исправления или удаления.", final=True)
+    def list_facts() -> str:
+        facts = ctx.memory.facts(limit=-1)
+        return "В памяти пока нет фактов." if not facts else "Помню: " + "; ".join(f"#{f.id}: {f.text}" for f in facts)
 
     @reg.tool(
         "Забыть факт по его номеру из списка «Что ты знаешь о пользователе».",
@@ -23,6 +45,8 @@ def register(reg: ToolRegistry, ctx: ToolContext) -> None:
         final=True,
     )
     def forget(fact_id: int) -> str:
+        if reg.user_text is not None and not reg.memory_edit_allowed:
+            raise ToolError("удаление факта разрешено только по просьбе пользователя")
         if not ctx.memory.delete_fact(int(fact_id)):
             raise ToolError(f"нет факта #{fact_id}")
         return "Забыла."

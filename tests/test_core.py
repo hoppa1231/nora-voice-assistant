@@ -273,3 +273,21 @@ def test_wake_word(text, request_text):
     from voice_assistant.wake import find_wake_word
 
     assert find_wake_word(text, "Нора") == request_text
+
+
+@pytest.mark.parametrize(
+    ("text", "echo", "result"),
+    [
+        ("Нора, стоп", "Сегодня в Петербурге плюс пять, облачно.", ""),
+        ("Хватит", "Сегодня в Петербурге плюс пять, облачно.", ""),
+        ("в Петербурге плюс пять нора подожди", "Сегодня в Петербурге плюс пять, облачно.", ""),
+        ("Нора, поставь таймер на пять минут", "Сегодня в Петербурге плюс пять, облачно.", "поставь таймер на пять минут"),
+        ("Сегодня в Петербурге плюс пять", "Сегодня в Петербурге плюс пять, облачно.", None),
+        ("Меня зовут Нора", "Меня зовут Нора, я голосовой ассистент.", None),
+        ("Какая-то музыка играет", "Сегодня облачно.", None),
+    ],
+)
+def test_interruption(text, echo, result):
+    from voice_assistant.wake import find_interruption
+
+    assert find_interruption(text, "Нора", echo) == result

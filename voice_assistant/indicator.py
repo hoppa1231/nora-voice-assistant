@@ -17,8 +17,10 @@ SYSTEM_PYTHON = "/usr/bin/python3"
 
 
 class Indicator:
-    def __init__(self, position: str = "bottom") -> None:
+    def __init__(self, position: str = "bottom", settings_path: Path | None = None, name: str = "") -> None:
         self._position = position
+        self._settings_path = settings_path
+        self._name = name
         self._proc: subprocess.Popen | None = None
         self._last: tuple | None = None
 
@@ -28,15 +30,16 @@ class Indicator:
             return
         try:
             self._proc = subprocess.Popen(
-                [SYSTEM_PYTHON, "-I", str(OVERLAY), self._position],
+                [SYSTEM_PYTHON, "-I", str(OVERLAY), self._position, str(self._settings_path or ""), self._name],
                 stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
         except OSError as error:
             log.warning("indicator failed to start: %s", error)
 
-    def set(self, state: str, until: float = 0.0, badge: str = "") -> None:
+    def set(self, state: str, until: float = 0.0, badge: str = "", tasks: list[dict] | None = None) -> None:
         """Send only changes; `until` (monotonic) is the end of the follow-up countdown."""
-        key = (state, until, badge)
+        tasks = tasks or []
+        key = (state, until, badge, json.dumps(tasks, sort_keys=True))
         if self._proc is None or key == self._last:
             return
         if self._proc.poll() is not None:
@@ -45,7 +48,7 @@ class Indicator:
             return
         self._last = key
         try:
-            self._proc.stdin.write(json.dumps({"state": state, "seconds": max(0.0, until - time.monotonic()) if until else 0, "badge": badge}, ensure_ascii=False) + "\n")
+            self._proc.stdin.write(json.dumps({"state": state, "seconds": max(0.0, until - time.monotonic()) if until else 0, "badge": badge, "tasks": tasks, "name": self._name}, ensure_ascii=False) + "\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
             self._proc = None

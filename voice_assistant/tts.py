@@ -92,6 +92,7 @@ def normalize_for_silero(text: str) -> str:
         )
     text = re.sub(r"\+(?=\d)", "плюс ", text).replace("−", "минус ")  # a "+" before a vowel marks stress
     text = re.sub(r"\bНор(?=[аеиуыо]\b)", "Н+ор", text)  # the assistant's name: НОра
+    text = re.sub(r"\b[Дд]жарви[зс]\b", lambda m: m[0].replace("а", "+а", 1), text)
     text = re.sub(r"(\d):(\d\d)", r"\1 \2", text)
 
     def spell(match: re.Match[str]) -> str:

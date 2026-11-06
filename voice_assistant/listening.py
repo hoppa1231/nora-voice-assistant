@@ -14,8 +14,8 @@ import time
 WINDOW_S = 600.0  # the mode lasts this long
 PAUSE_S = 3.5  # silence that means «I've finished», instead of the usual 0.6 s
 
-STARTED = "Хорошо, слушаю до десяти минут и не перебиваю. Говори спокойно, отвечу, когда замолчишь на несколько секунд."
-STOPPED = "Хорошо, вернулась в обычный режим."
+STARTED = "Ну давай, выкладывай: слушаю до десяти минут и перебивать не буду. Замолчишь на несколько секунд — отвечу."
+STOPPED = "Ладно, вернулась в обычный режим."
 
 _ON = re.compile(
     r"(?:говорить|поговорить|рассказывать|рассказать|подумать|слушать|слушай)\s+(?:меня\s+)?(?:подольше|дольше|долго|до\s+конца)"
@@ -35,7 +35,7 @@ _OFF = re.compile(
 )
 # Words that do not make a request on their own: «Нора, я хочу говорить подольше, пожалуйста».
 _FILLER = {
-    "нора", "эй", "я", "мне", "меня", "хочу", "хотела", "хотел", "бы", "пожалуйста", "давай", "ну", "и", "а",
+    "нора", "джарвиз", "джарвис", "jarvis", "эй", "я", "мне", "меня", "хочу", "хотела", "хотел", "бы", "пожалуйста", "давай", "ну", "и", "а",
     "сейчас", "можно", "можешь", "ты", "так", "что", "чтобы", "очень", "буду", "немного", "только",
 }
 
@@ -65,11 +65,14 @@ class LongListening:
     def active(self) -> bool:
         return time.monotonic() < self.until
 
-    def start(self) -> None:
-        self.until = time.monotonic() + WINDOW_S
+    def start(self, window_s: float = WINDOW_S) -> None:
+        self.until = max(self.until, time.monotonic() + window_s)
 
     def stop(self) -> None:
         self.until = 0.0
+
+    def clear(self) -> None:
+        self._parts.clear()
 
     @property
     def collecting(self) -> bool:

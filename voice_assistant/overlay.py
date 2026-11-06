@@ -3,10 +3,10 @@
 Runs as a separate process under the *system* Python (GTK and gtk-layer-shell come
 from the distro, not from the venv) and reads JSON lines on stdin:
 
-    {"state": "attentive", "seconds": 8, "badge": "Клод работает"}
+    {"state": "attentive", "seconds": 8, "name": "Джарвиз", "tasks": []}
 
-It exits when stdin closes, i.e. together with the assistant. Mouse clicks pass
-through it. Standalone on purpose: no imports from the package.
+It exits when stdin closes. Drag the panel to move it; right click resets its
+position. Standalone: GTK is provided by the system Python, not the project venv.
 """
 
 from __future__ import annotations
@@ -16,14 +16,22 @@ import math
 import sys
 import threading
 import time
+import importlib.util
+import subprocess
+from pathlib import Path
 
 import cairo
 import gi
 
 gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
 gi.require_version("PangoCairo", "1.0")
-from gi.repository import GLib, Gtk, GtkLayerShell, Pango, PangoCairo  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk, GtkLayerShell, Pango, PangoCairo  # noqa: E402
+
+spec = importlib.util.spec_from_file_location("overlay_model", Path(__file__).with_name("overlay_model.py"))
+model = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(model)
 
 # state: (dot colour, label)
 STATES = {
@@ -41,7 +49,7 @@ FONT = Pango.FontDescription.from_string("Sans 10.5")
 
 
 class Pill(Gtk.Window):
-    def __init__(self, position: str) -> None:
+    def __init__(self, position: str, settings_path: str = "", name: str = "") -> None:
         super().__init__()
         self.state = "idle"
         self.badge = ""
@@ -49,13 +57,23 @@ class Pill(Gtk.Window):
         self.total = 0.0
         self.changed = time.monotonic()
         self.width = HEIGHT
+        self.height = HEIGHT
+        self.tasks = []
+        self.name = name
+        self.settings_path = settings_path
+        self.position = position
+        self.saved = model.load_position(settings_path)
+        self.x, self.y = self.saved or (0, 0)
+        self.drag = None
 
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
         GtkLayerShell.set_namespace(self, "nora-indicator")
-        edge = GtkLayerShell.Edge.TOP if position == "top" else GtkLayerShell.Edge.BOTTOM
-        GtkLayerShell.set_anchor(self, edge, True)
-        GtkLayerShell.set_margin(self, edge, 56 if position == "top" else 26)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
+        display = Gdk.Display.get_default()
+        self.monitor = display.get_primary_monitor() or display.get_monitor(0)
+        GtkLayerShell.set_monitor(self, self.monitor)
         GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
         GtkLayerShell.set_exclusive_zone(self, -1)
 
@@ -65,8 +83,12 @@ class Pill(Gtk.Window):
         self.set_app_paintable(True)
         self.area = Gtk.DrawingArea()
         self.area.connect("draw", self.draw)
+        self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
+        self.area.connect("button-press-event", self.press)
+        self.area.connect("button-release-event", self.release)
+        self.area.connect("motion-notify-event", self.motion)
+        self.area.set_tooltip_text("Перетащи, чтобы переместить. Правый клик — вернуть на исходное место.")
         self.add(self.area)
-        self.connect("realize", lambda *_: self.get_window().input_shape_combine_region(cairo.Region(), 0, 0))
         self.resize_to_content()
         GLib.timeout_add(33, self.tick)
 
@@ -76,6 +98,11 @@ class Pill(Gtk.Window):
             self.changed = time.monotonic()
         self.state = state if state in STATES else "idle"
         self.badge = message.get("badge", "")
+        self.name = str(message.get("name", self.name))
+        self.tasks = [t for t in message.get("tasks", []) if isinstance(t, dict)][:3]
+        hint = "Перетащи, чтобы переместить. Правый клик — вернуть на исходное место."
+        details = [f"{t.get('title', 'Задача')}\n{t.get('detail', '')}".strip() for t in self.tasks]
+        self.area.set_tooltip_text("\n\n".join([hint, *details]))
         seconds = float(message.get("seconds") or 0)
         if seconds:
             self.until, self.total = time.monotonic() + seconds, seconds
@@ -84,7 +111,59 @@ class Pill(Gtk.Window):
 
     def label(self) -> str:
         text = STATES[self.state][1]
-        return " · ".join(t for t in (text, self.badge) if t)
+        return " · ".join(t for t in (self.name, text, "" if self.tasks else self.badge) if t)
+
+    def place(self) -> None:
+        geometry = self.monitor.get_geometry()
+        if self.saved is None:
+            self.x = (geometry.width - self.width) // 2
+            self.y = 56 if self.position == "top" else geometry.height - self.height - 26
+        self.x, self.y = model.clamp_position(self.x, self.y, self.width, self.height, geometry.width, geometry.height)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, self.x)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, self.y)
+
+    def cursor(self, event) -> tuple[float, float]:
+        # Wayland does not expose global pointer coordinates; Hyprland does.
+        try:
+            data = json.loads(subprocess.check_output(["hyprctl", "cursorpos", "-j"], timeout=0.15))
+            return float(data["x"]), float(data["y"])
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            return self.x + event.x, self.y + event.y
+
+    def press(self, _widget, event) -> bool:
+        if event.button == 3:
+            self.saved = None
+            self.place()
+            try:
+                Path(self.settings_path).unlink(missing_ok=True) if self.settings_path else None
+            except OSError:
+                pass
+            return True
+        if event.button == 1:
+            self.drag = (self.cursor(event), self.x, self.y)
+            return True
+        return False
+
+    def motion(self, _widget, event) -> bool:
+        if self.drag is None:
+            return False
+        (cx, cy), x, y = self.drag
+        nx, ny = self.cursor(event)
+        self.x, self.y = round(x + nx - cx), round(y + ny - cy)
+        self.saved = (self.x, self.y)
+        self.place()
+        return True
+
+    def release(self, _widget, event) -> bool:
+        if event.button == 1 and self.drag is not None:
+            self.motion(_widget, event)
+            self.drag = None
+            try:
+                model.save_position(self.settings_path, self.x, self.y)
+            except OSError as error:
+                print(f"Cannot save indicator position: {error}", file=sys.stderr)
+            return True
+        return False
 
     def resize_to_content(self) -> None:
         text = self.label()
@@ -93,10 +172,13 @@ class Pill(Gtk.Window):
             layout = self.create_pango_layout(text)
             layout.set_font_description(FONT)
             width = PAD + DOT * 2 + 10 + layout.get_pixel_size()[0] + PAD + 2
-        if width != self.width or not self.get_visible():
-            self.width = width
-            self.area.set_size_request(width, HEIGHT)
-            self.resize(width, HEIGHT)
+        width = 356 if self.tasks else min(440, max(width + 20, 120 if self.name else HEIGHT))
+        height = HEIGHT + (44 * len(self.tasks) + 6 if self.tasks else 0)
+        if width != self.width or height != self.height or not self.get_visible():
+            self.width, self.height = width, height
+            self.area.set_size_request(width, height)
+            self.resize(width, height)
+            self.place()
 
     def tick(self) -> bool:
         self.area.queue_draw()
@@ -105,19 +187,21 @@ class Pill(Gtk.Window):
     def draw(self, _widget, cr: cairo.Context) -> None:
         now = time.monotonic()
         t = now - self.changed
-        w, h = self.width, HEIGHT
+        w, h = self.width, self.height
         cr.set_operator(cairo.OPERATOR_SOURCE)
         cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
 
-        quiet = self.state in ("idle", "hearing") and not self.badge
-        r = h / 2
+        quiet = self.state in ("idle", "hearing") and not self.badge and not self.name and not self.tasks
+        r = HEIGHT / 2
         cr.new_sub_path()
-        cr.arc(r, r, r, math.pi / 2, 3 * math.pi / 2)
-        cr.arc(w - r, r, r, 3 * math.pi / 2, math.pi / 2)
+        cr.arc(w - r, r, r, -math.pi / 2, 0)
+        cr.arc(w - r, h - r, r, 0, math.pi / 2)
+        cr.arc(r, h - r, r, math.pi / 2, math.pi)
+        cr.arc(r, r, r, math.pi, 3 * math.pi / 2)
         cr.close_path()
-        cr.set_source_rgba(0.08, 0.09, 0.11, 0.45 if quiet else 0.82)
+        cr.set_source_rgba(0.08, 0.09, 0.11, 0.96 if self.tasks else 0.45 if quiet else 0.90)
         cr.fill_preserve()
         cr.set_source_rgba(1, 1, 1, 0.08)
         cr.set_line_width(1)
@@ -165,13 +249,48 @@ class Pill(Gtk.Window):
             layout.set_text(text, -1)
             _, th = layout.get_pixel_size()
             cr.set_source_rgba(0.95, 0.96, 0.98, 0.95)
-            cr.move_to(PAD + DOT * 2 + 10, (h - th) / 2)
+            layout.set_width(max(1, w - 65) * Pango.SCALE)
+            layout.set_ellipsize(Pango.EllipsizeMode.END)
+            cr.move_to(PAD + DOT * 2 + 10, (HEIGHT - th) / 2)
+            PangoCairo.show_layout(cr, layout)
+
+        # Small grip makes the movable surface discoverable.
+        for dx in (0, 4):
+            for dy in (-4, 0, 4):
+                cr.set_source_rgba(0.8, 0.82, 0.9, 0.45)
+                cr.arc(w - 16 + dx, HEIGHT / 2 + dy, 0.8, 0, 2 * math.pi)
+                cr.fill()
+        for i, task in enumerate(self.tasks):
+            y = HEIGHT + i * 44
+            state = task.get("state", "")
+            color = (1.0, 0.42, 0.42) if state == "failed" else (0.3, 0.82, 0.58) if state == "done" else (0.5, 0.65, 1.0)
+            cr.set_source_rgba(1, 1, 1, 0.08)
+            cr.rectangle(13, y, w - 26, 1)
+            cr.fill()
+            cr.set_source_rgb(*color)
+            cr.arc(19, y + 16, 3, 0, 2 * math.pi)
+            cr.fill()
+            layout = PangoCairo.create_layout(cr)
+            layout.set_font_description(Pango.FontDescription.from_string("Sans 9.5"))
+            layout.set_width((w - 50) * Pango.SCALE)
+            layout.set_ellipsize(Pango.EllipsizeMode.END)
+            layout.set_text(str(task.get("title", "Задача")), -1)
+            cr.set_source_rgba(0.96, 0.97, 0.99, 0.96)
+            cr.move_to(30, y + 6)
+            PangoCairo.show_layout(cr, layout)
+            end = now if state in ("awaiting_confirmation", "preparing", "running", "checking") else float(task.get("updated", now))
+            elapsed = max(0, int(end - float(task.get("created", end))))
+            status = f"{task.get('agent', '')} · {model.TASK_LABELS.get(state, state)} · {elapsed // 60:02}:{elapsed % 60:02}"
+            layout.set_font_description(Pango.FontDescription.from_string("Sans 8"))
+            layout.set_text(status, -1)
+            cr.set_source_rgba(0.7, 0.74, 0.82, 0.95)
+            cr.move_to(30, y + 24)
             PangoCairo.show_layout(cr, layout)
 
         if self.state == "attentive" and self.until > now and self.total:  # follow-up countdown
             left = (self.until - now) / self.total
             cr.set_source_rgba(cr_, cg, cb, 0.8)
-            cr.rectangle(r, h - 3, (w - 2 * r) * left, 2)
+            cr.rectangle(r, HEIGHT - 3, (w - 2 * r) * left, 2)
             cr.fill()
 
 
@@ -187,7 +306,7 @@ def read_stdin(pill: Pill) -> None:
 
 def main() -> None:
     position = sys.argv[1] if len(sys.argv) > 1 else "bottom"
-    pill = Pill(position)
+    pill = Pill(position, sys.argv[2] if len(sys.argv) > 2 else "", sys.argv[3] if len(sys.argv) > 3 else "")
     pill.show_all()
     threading.Thread(target=read_stdin, args=(pill,), daemon=True).start()
     Gtk.main()

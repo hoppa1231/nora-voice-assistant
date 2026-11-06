@@ -26,6 +26,8 @@ _ISO = re.compile(r"^P?T?(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\
 def parse_duration(text: str) -> int:
     """'5 минут', 'полтора часа', '1 час 20 минут', 'PT90S' -> seconds."""
     raw = text.strip()
+    if re.search(r"-\s*\d|\bминус\b", raw, re.I):
+        raise ToolError("длительность должна быть положительной")
     iso = _ISO.match(raw.replace(" ", ""))
     if iso and any(iso.groups()):
         h, m, s = (float(g or 0) for g in iso.groups())
@@ -161,3 +163,17 @@ def register(reg: ToolRegistry, ctx: ToolContext) -> None:
         if not ctx.memory.finish_alarm(int(alarm_id)):
             raise ToolError(f"нет активного таймера или напоминания #{alarm_id}")
         return "Отменила."
+
+    @reg.tool(
+        "Отменить единственный таймер или все таймеры. Напоминания не затрагивает.",
+        {"all_timers": {"type": "boolean"}}, final=True,
+    )
+    def cancel_timer(all_timers: bool = False) -> str:
+        timers = [a for a in ctx.memory.pending_alarms() if a.kind == "timer"]
+        if not timers:
+            return "Активных таймеров нет."
+        if len(timers) > 1 and not all_timers:
+            return "Таймеров несколько. Уточни номер или скажи: отмени все таймеры."
+        for timer in timers:
+            ctx.memory.finish_alarm(timer.id)
+        return "Отменила все таймеры." if all_timers else "Отменила таймер."

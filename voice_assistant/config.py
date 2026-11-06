@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+from .personas import NORA, Persona, get_persona
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 SILERO_CACHE_DIR = Path.home() / ".cache/torch/hub/snakers4_silero-models_master/src/silero/model"
@@ -76,6 +77,19 @@ class Config:
     wake_word: str  # empty: answer every phrase
     wake_followup_s: float  # after an answer, the next phrase needs no name for this long
     indicator: str  # on-screen status pill: bottom | top | off
+    barge_in: bool  # keep listening while answering, so «Нора, стоп» interrupts
+    turn_pause_s: float = 2.4
+    incomplete_pause_s: float = 4.5
+    aec_mode: str = "auto"
+    aec_source: str = ""
+    aec_sink: str = ""
+    music_duck: bool = True
+    music_duck_factor: float = 0.35
+    barge_engine: str = "auto"
+    vosk_model_dir: Path = PROJECT_DIR / "models" / "vosk-model-small-ru-0.22"
+    tool_groups: str = "all"
+    disabled_tools: str = ""
+    persona: Persona = NORA
 
 
 def _str(name: str, default: str) -> str:
@@ -111,11 +125,13 @@ def _system_timezone() -> str:
         return "UTC"
 
 
-def load_config() -> Config:
+def load_config(profile: str | None = None) -> Config:
     load_dotenv(PROJECT_DIR / ".env")
-    db_path = Path(_str("DB_PATH", str(PROJECT_DIR / "data" / "assistant.db"))).expanduser()
+    persona = get_persona(profile or _str("ASSISTANT_PROFILE", "nora"))
+    jarvis = persona.key == "jarvis"
+    db_path = Path(_str("JARVIS_DB_PATH", str(PROJECT_DIR / "data" / "jarvis" / "assistant.db")) if jarvis else _str("DB_PATH", str(PROJECT_DIR / "data" / "assistant.db"))).expanduser()
     silero_model = _str("SILERO_MODEL", "v5_5_ru")
-    return Config(
+    config = Config(
         llm=LlmConfig(
             base_url=_str("LM_BASE_URL", "http://localhost:1234/v1"),
             api_key=_str("LM_API_KEY", "lm-studio"),
@@ -143,19 +159,19 @@ def load_config() -> Config:
             output_device=_device("AUDIO_OUTPUT_DEVICE"),
             vad_threshold=_float("VAD_THRESHOLD", 0.5),
             min_speech_ms=_int("VAD_MIN_SPEECH_MS", 250),
-            min_silence_ms=_int("VAD_MIN_SILENCE_MS", 600),
+            min_silence_ms=_int("VAD_MIN_SILENCE_MS", 1000),
             speech_pad_ms=_int("VAD_SPEECH_PAD_MS", 300),
-            max_utterance_s=_float("VAD_MAX_UTTERANCE_S", 20.0),
+            max_utterance_s=_float("VAD_MAX_UTTERANCE_S", 60.0),
             mic_gain=_float("MIC_GAIN", 2.0),
         ),
         tts=TtsConfig(
-            backend=_str("TTS_BACKEND", "edge").lower(),
-            edge_voice=_str("EDGE_TTS_VOICE", "ru-RU-SvetlanaNeural"),
+            backend=_str("TTS_BACKEND", "silero").lower(),
+            edge_voice=_str("JARVIS_EDGE_TTS_VOICE", "ru-RU-DmitryNeural") if jarvis else _str("EDGE_TTS_VOICE", "ru-RU-SvetlanaNeural"),
             edge_rate=_str("EDGE_TTS_RATE", "+0%"),
             edge_first_chunk_timeout_s=_float("EDGE_TTS_FIRST_CHUNK_TIMEOUT_S", 2.5),
             edge_retry_after_s=_float("EDGE_TTS_RETRY_AFTER_S", 60.0),
             silero_model_path=Path(_str("SILERO_MODEL_PATH", str(SILERO_CACHE_DIR / f"{silero_model}.pt"))),
-            silero_speaker=_str("SILERO_SPEAKER", "baya"),
+            silero_speaker=_str("JARVIS_SILERO_SPEAKER", "eugene") if jarvis else _str("SILERO_SPEAKER", "baya"),
             silero_sample_rate=_int("SILERO_SAMPLE_RATE", 24000),
             torch_threads=_int("TORCH_THREADS", 4),
         ),
@@ -163,7 +179,25 @@ def load_config() -> Config:
         timezone=_str("TIMEZONE", "") or _system_timezone(),
         default_city=_str("DEFAULT_CITY", ""),
         history_messages=_int("HISTORY_MESSAGES", 10),
-        wake_word=_str("WAKE_WORD", "нора").lower(),
-        wake_followup_s=_float("WAKE_FOLLOWUP_S", 8.0),
+        wake_word=(_str("JARVIS_WAKE_WORD", persona.wake_word) if jarvis else _str("WAKE_WORD", persona.wake_word)).lower(),
+        wake_followup_s=_float("WAKE_FOLLOWUP_S", 15.0),
         indicator=_str("INDICATOR", "bottom").lower(),
+        barge_in=_str("BARGE_IN", "1") not in ("0", "false", "no", "off"),
+        turn_pause_s=_float("TURN_PAUSE_S", 2.4),
+        incomplete_pause_s=_float("TURN_INCOMPLETE_PAUSE_S", 4.5),
+        aec_mode=_str("AEC_MODE", "auto").lower(),
+        aec_source=_str("AEC_SOURCE", ""),
+        aec_sink=_str("AEC_SINK", ""),
+        music_duck=_str("MUSIC_DUCK", "1").lower() not in ("0", "false", "off"),
+        music_duck_factor=_float("MUSIC_DUCK_FACTOR", 0.35),
+        barge_engine=_str("BARGE_ENGINE", "auto").lower(),
+        vosk_model_dir=Path(_str("VOSK_MODEL_DIR", str(PROJECT_DIR / "models" / "vosk-model-small-ru-0.22"))).expanduser(),
+        tool_groups=_str("TOOL_GROUPS", "all"),
+        disabled_tools=_str("DISABLED_TOOLS", ""),
+        persona=persona,
     )
+    if config.aec_mode not in ("auto", "on", "off"):
+        raise ValueError("AEC_MODE должен быть auto, on или off")
+    if config.barge_engine not in ("auto", "vosk", "gigaam", "off"):
+        raise ValueError("BARGE_ENGINE должен быть auto, vosk, gigaam или off")
+    return config

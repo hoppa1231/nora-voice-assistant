@@ -70,6 +70,17 @@ class LlmClient:
         )
         text: list[str] = []
         calls: dict[int, ToolCall] = {}
+        try:
+            await self._read(stream, text, calls, on_text)
+        finally:
+            await stream.close()  # interrupted: tell the server to stop generating
+        tool_calls = [calls[i] for i in sorted(calls)]
+        for i, call in enumerate(tool_calls):
+            call.id = call.id or f"call_{i}"
+        return Reply("".join(text), tool_calls)
+
+    @staticmethod
+    async def _read(stream, text: list[str], calls: dict[int, ToolCall], on_text: Callable[[str], None]) -> None:
         async for chunk in stream:
             if not chunk.choices:
                 continue
@@ -85,10 +96,6 @@ class LlmClient:
                     call.name += part.function.name
                 if part.function and part.function.arguments:
                     call.arguments += part.function.arguments
-        tool_calls = [calls[i] for i in sorted(calls)]
-        for i, call in enumerate(tool_calls):
-            call.id = call.id or f"call_{i}"
-        return Reply("".join(text), tool_calls)
 
     async def warm_up(self, messages: list[dict], tools: list[dict]) -> None:
         """Have the server process (and cache) this prompt prefix before the real request needs it."""

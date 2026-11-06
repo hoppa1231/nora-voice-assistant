@@ -91,9 +91,9 @@ async def test_confirmation_is_decided_in_code():
     assert pending.request("Закрыть окно?", run) == "Закрыть окно? Подтверди: скажи «да» или «нет»."
     assert (await assistant.handle("Да, давай"))[0] == "Сделала."
     pending.request("Закрыть окно?", run)
-    assert (await assistant.handle("нет, не надо"))[0] == "Хорошо, не буду."
+    assert (await assistant.handle("нет, не надо"))[0] == "Ладно, не буду."
     pending.request("Закрыть окно?", run)
-    assert (await assistant.handle("да нет, не надо"))[0] == "Хорошо, не буду."
+    assert (await assistant.handle("да нет, не надо"))[0] == "Ладно, не буду."
     assert calls == [1]
 
 
@@ -180,20 +180,24 @@ def fake_coder() -> tuple[ToolRegistry, list[str]]:
 
 
 async def test_new_function_asks_details_first():
-    from voice_assistant.skills import ASK_DETAILS
+    import json
+    from voice_assistant.skills import ASK_DETAILS, QUOTE_HEADER
+
+    def quotes(task):
+        return json.JSONDecoder().raw_decode(task.removeprefix(QUOTE_HEADER))[0]
 
     reg, tasks = fake_coder()
     assistant = Assistant(NoLlm(), reg, Memory(":memory:"), SilentSpeaker(), MSK)
     assert (await assistant.handle("Допиши функцию"))[0] == ASK_DETAILS
     answer = (await assistant.handle("Пусть по утрам говорит, сколько дней до выходных"))[0]
     assert answer.endswith("Подтверди: скажи «да» или «нет».")
-    assert tasks[0].startswith("Допиши функцию: Пусть по утрам говорит, сколько дней до выходных.")
-    assert "простая и понятная" in tasks[0]
+    assert quotes(tasks[0]) == ["Допиши функцию", "Пусть по утрам говорит, сколько дней до выходных"]
+    assert "простая и понятная" not in tasks[0]
 
     assert (await assistant.handle("Сделай так"))[0] == ASK_DETAILS
-    assert (await assistant.handle("Нет, не надо"))[0] == "Хорошо, не буду."
+    assert (await assistant.handle("Нет, не надо"))[0] == "Ладно, не буду."
     await assistant.handle("Допиши функцию, чтобы ты считала калории")
-    assert len(tasks) == 2 and tasks[1].startswith("Допиши функцию, чтобы ты считала калории.")
+    assert len(tasks) == 2 and quotes(tasks[1]) == ["Допиши функцию, чтобы ты считала калории"]
 
 
 async def test_new_function_question_expires(monkeypatch):
@@ -301,3 +305,71 @@ def test_main_module_imports():
     import voice_assistant.__main__ as main
 
     assert main.parse_command("не перебивай") == "on"
+
+
+async def test_speaker_interrupt_drops_queue():
+    import asyncio
+
+    import numpy as np
+
+    from voice_assistant.speech import Speaker
+
+    played: list[float] = []
+
+    class SlowTts:
+        async def synthesize(self, sentence):
+            await asyncio.sleep(0.01)
+            return np.zeros(10, dtype=np.float32), 24000
+
+    class FakePlayer:
+        def __init__(self):
+            self.stopped = asyncio.Event()
+
+        async def play(self, audio, rate):
+            played.append(rate)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.stopped.wait(), 1)  # «plays» until stopped
+
+        def stop(self):
+            self.stopped.set()
+
+    import contextlib
+
+    speaker = Speaker(SlowTts(), FakePlayer())
+    speaker.start()
+    speaker.say("Первое предложение довольно длинное, чтобы его разрезать. Второе. Третье. Четвёртое.")
+    await asyncio.sleep(0.05)
+    assert speaker.speaking and "Второе" in speaker.recent_text
+    speaker.interrupt()
+    await asyncio.wait_for(speaker.wait_done(), 1)
+    assert len(played) == 1 and not speaker.speaking
+    speaker.say("Снова.")  # still works after an interruption
+    await asyncio.sleep(0.05)
+    assert len(played) == 2
+    await speaker.close()
+
+
+@pytest.mark.parametrize(
+    ("text", "details"),
+    [
+        ("Сделай апгрейд", ""),
+        ("Нора, сделай апгрейд", ""),
+        ("Апгрейд: научись говорить курс доллара утром", "Апгрейд: научись говорить курс доллара утром"),
+        ("Давай апгрейд", ""),
+        ("Улучши себя", ""),
+        ("Какой апгрейд у видеокарты лучше", None),
+    ],
+)
+def test_upgrade_phrase(text, details):
+    from voice_assistant.skills import parse_request
+
+    assert parse_request(text) == details
+
+
+async def test_upgrade_dialogue_listens_patiently():
+    from voice_assistant.listening import LongListening
+
+    listening = LongListening()
+    assistant = Assistant(NoLlm(), ToolRegistry(), Memory(":memory:"), SilentSpeaker(), MSK, listening=listening)
+    answer, _ = await assistant.handle("Сделай апгрейд")
+    assert answer.startswith("Давай, излагай задачу") and listening.active
