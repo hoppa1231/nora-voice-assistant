@@ -90,6 +90,9 @@ class Config:
     tool_groups: str = "all"
     disabled_tools: str = ""
     persona: Persona = NORA
+    thinking_cues: bool = True
+    thinking_delay_s: float = 4.0
+    thinking_interval_s: float = 14.0
 
 
 def _str(name: str, default: str) -> str:
@@ -195,9 +198,14 @@ def load_config(profile: str | None = None) -> Config:
         tool_groups=_str("TOOL_GROUPS", "all"),
         disabled_tools=_str("DISABLED_TOOLS", ""),
         persona=persona,
+        thinking_cues=_str("THINKING_CUES", "1").lower() not in ("0", "false", "no", "off"),
+        thinking_delay_s=_float("THINKING_CUE_DELAY_S", 4.0),
+        thinking_interval_s=_float("THINKING_CUE_INTERVAL_S", 14.0),
     )
     if config.aec_mode not in ("auto", "on", "off"):
         raise ValueError("AEC_MODE должен быть auto, on или off")
+    if not (config.thinking_delay_s >= 1 and config.thinking_interval_s >= 5):
+        raise ValueError("THINKING_CUE_DELAY_S должен быть >= 1, THINKING_CUE_INTERVAL_S >= 5")
     if config.barge_engine not in ("auto", "vosk", "gigaam", "off"):
         raise ValueError("BARGE_ENGINE должен быть auto, vosk, gigaam или off")
     return config

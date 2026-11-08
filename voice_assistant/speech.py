@@ -112,6 +112,9 @@ class Speaker:
         self.recent_text = ""  # what is being said now: the microphone hears it too (echo filter)
         self._generation = 0  # bumped by interrupt(): audio from before it is never played
         self._current: asyncio.Future | None = None
+        self._waiting: set[asyncio.Future] = set()
+        self._discarded_waiting: set[asyncio.Future] = set()
+        self._waiting_cache: dict[str, Audio] = {}
 
     @property
     def speaking(self) -> bool:
@@ -134,6 +137,7 @@ class Speaker:
                 await self._worker
 
     def feed(self, text: str) -> None:
+        self.cancel_waiting()
         for sentence in self._splitter.feed(text):
             self._enqueue_text(sentence)
 
@@ -144,6 +148,31 @@ class Speaker:
     def say(self, text: str) -> None:
         self.feed(text)
         self.end_of_text()
+
+    def say_waiting(self, text: str) -> bool:
+        if self.speaking:
+            return False
+        item = asyncio.create_task(self._synthesize_waiting(text))
+        self._waiting.add(item)
+        self._enqueue(item)
+        self.recent_text = text  # echo/barge-in detection must also know these words
+        return True
+
+    async def _synthesize_waiting(self, text: str) -> Audio | None:
+        if text not in self._waiting_cache:
+            audio = await self._synthesize(text)
+            if audio is not None:
+                self._waiting_cache[text] = audio
+            return audio
+        return self._waiting_cache[text]
+
+    def cancel_waiting(self) -> None:
+        # Drop unplayed cues. A short phrase already playing may finish naturally;
+        # interrupt() still stops it immediately, like all other speech.
+        for item in self._waiting:
+            self._discarded_waiting.add(item)
+            if not item.done():
+                item.cancel()
 
     def play_sound(self, audio: np.ndarray, sample_rate: int) -> None:
         future: asyncio.Future[Audio | None] = asyncio.get_running_loop().create_future()
@@ -161,6 +190,8 @@ class Speaker:
             self._current.cancel()
         while not self._queue.empty():
             self._queue.get_nowait().cancel()
+        self._waiting.clear()
+        self._discarded_waiting.clear()
         self._player.stop()
 
     def _enqueue_text(self, sentence: str) -> None:
@@ -200,15 +231,17 @@ class Speaker:
                     if not item.cancelled() or asyncio.current_task().cancelling():
                         raise
                     audio = None  # dropped by interrupt()
-                if generation != self._generation:
+                if generation != self._generation or item in self._discarded_waiting:
                     audio = None  # interrupted while this sentence was being synthesized
                 if audio is not None:
-                    if self.first_audio_at is None:
+                    if self.first_audio_at is None and item not in self._waiting:
                         self.first_audio_at = time.monotonic()
                     await self._player.play(*audio)
             except Exception:
                 log.exception("playback failed")
             finally:
+                self._waiting.discard(item)
+                self._discarded_waiting.discard(item)
                 self._current = None
                 if self._queue.empty():
                     self._idle.set()
@@ -228,6 +261,8 @@ class SilentSpeaker:
     def feed(self, text: str) -> None: ...
     def end_of_text(self) -> None: ...
     def say(self, text: str) -> None: ...
+    def say_waiting(self, text: str) -> bool: return False
+    def cancel_waiting(self) -> None: ...
     def interrupt(self) -> None: ...
     def play_sound(self, audio: np.ndarray, sample_rate: int) -> None: ...
     async def wait_done(self) -> None: ...

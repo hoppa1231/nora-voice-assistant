@@ -185,6 +185,9 @@ async def run(cfg: Config, args: argparse.Namespace) -> None:
         listening=ctx.listening,
         persona=cfg.persona,
         wake_word=cfg.wake_word,
+        thinking_cues=cfg.thinking_cues,
+        thinking_delay_s=cfg.thinking_delay_s,
+        thinking_interval_s=cfg.thinking_interval_s,
     )
     listening = ctx.listening
     alarms: asyncio.Task | None = None

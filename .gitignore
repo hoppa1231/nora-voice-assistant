@@ -1,6 +1,30 @@
-.venv/
-__pycache__/
-.pytest_cache/
+# Local configuration and credentials
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime data, models and recordings
 data/
 models/
+*.log
+*.wav
+*.mp3
+
+# Python and tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.ruff_cache/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store

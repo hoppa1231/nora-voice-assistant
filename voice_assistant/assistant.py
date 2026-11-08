@@ -24,6 +24,7 @@ from .routines import learn_routine, match_routine, routine_hint
 from .skills import DETAILS_WINDOW_S, SkillDialogue, build_task, clean_request, parse_request
 from .speech import SilentSpeaker, Speaker
 from .tools import PendingActions, ToolRegistry
+from .thinking import ThinkingCues
 
 log = logging.getLogger("va.assistant")
 
@@ -66,6 +67,9 @@ class Assistant:
         quiet: QuietMode | None = None,
         persona: Persona = NORA,
         wake_word: str | None = None,
+        thinking_cues: bool = True,
+        thinking_delay_s: float = 4.0,
+        thinking_interval_s: float = 14.0,
     ) -> None:
         self._llm = llm
         self.persona = persona
@@ -84,6 +88,7 @@ class Assistant:
         self._skill = SkillDialogue()
         self._listening = listening or LongListening()
         self.quiet = quiet or QuietMode()
+        self._thinking_cues = ThinkingCues(speaker, self.quiet, enabled=thinking_cues, delay=thinking_delay_s, interval=thinking_interval_s)
         self._quick = QuickCommands(tools)
         self._memory_dialogue = MemoryDialogue(memory, tools)
 
@@ -190,7 +195,7 @@ class Assistant:
 
     async def handle(self, user_text: str) -> tuple[str, TurnStats]:
         try:
-            return await self._handle(user_text)
+            return await self._thinking_cues.wait(self._handle(user_text))
         finally:
             self._tools.user_text = None
             self._tools.raw_user_text = None

@@ -54,6 +54,7 @@ required, final) и подключается в build_tools в tools/__init__.py
 MODE_NOTES = {
     "question": "только ответ на вопрос, ничего не меняй.",
     "change": "можно менять файлы проекта. Перед ИТОГ убедись, что тесты проходят.",
+    "publish": "выполни публикацию через сеть. Не меняй файлы, не создавай коммиты и не отправляй незакоммиченные изменения.",
 }
 
 
@@ -95,13 +96,15 @@ def command(agent: str, task: str, project: Path, mode: str, brief: str, out_fil
         else:
             cmd += ["--allowedTools", *READ_TOOLS, "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit"]
         return cmd
-    sandbox = "workspace-write" if mode == "change" else "read-only"
-    return [
+    sandbox = "workspace-write" if mode in {"change", "publish"} else "read-only"
+    cmd = [
         "codex", "exec", "--cd", str(project), "--sandbox", sandbox, "--skip-git-repo-check", "--ephemeral",
         "--model", os.getenv("CODEX_MODEL", "gpt-6-luna"),
         "-c", "model_reasoning_effort=" + json.dumps(os.getenv("CODEX_REASONING_EFFORT", "low")),
-        "-o", str(out_file), f"{brief}\n\nЗадача: {task}",
     ]
+    if mode == "publish":
+        cmd += ["-c", "sandbox_workspace_write.network_access=true"]
+    return [*cmd, "-o", str(out_file), f"{brief}\n\nЗадача: {task}"]
 
 
 def parse_answer(agent: str, stdout: str, out_file: Path) -> str:
@@ -256,18 +259,21 @@ def register(reg: ToolRegistry, ctx: ToolContext) -> None:
     @reg.tool(
         "Поручить задачу программисту-агенту (Claude или Codex), он работает в фоне несколько минут и потом "
         "сообщает итог. mode=question — сложный вопрос, разбор кода, исследование, ничего не меняет. "
-        "mode=change — написать или исправить код (например, добавить тебе новое умение), спросит подтверждение.",
+        "mode=change — написать или исправить код (например, добавить тебе новое умение), спросит подтверждение. "
+        "mode=publish — прямая просьба опубликовать через GitHub: только Codex, без изменения файлов и создания коммитов.",
         {
             "task": {"type": "string", "description": "Дословная цитата запроса пользователя, без пересказа, сокращений и собственных требований."},
             "agent": {"type": "string", "enum": ["claude", "codex"], "description": "По умолчанию codex. Claude только по явной просьбе пользователя."},
             "project": {"type": "string", "description": "self — твой собственный код; иначе имя папки проекта в ~/Projects."},
-            "mode": {"type": "string", "enum": ["question", "change"]},
+            "mode": {"type": "string", "enum": ["question", "change", "publish"]},
         },
         required=("task", "mode"),
         final=True,
     )
     async def ask_coder(task: str, mode: str, agent: str = "codex", project: str = "self") -> str:
         agent = agent if agent in AGENT_NAMES else "codex"
+        if mode == "publish" and agent != "codex":
+            raise ToolError("публикацию может выполнять только Codex")
         if shutil.which(agent) is None:
             raise ToolError(f"не установлен {agent}")
         if coder.busy:
@@ -278,9 +284,13 @@ def register(reg: ToolRegistry, ctx: ToolContext) -> None:
             task = reg.coder_request or build_task(reg.raw_user_text, persona=ctx.persona)
         name = AGENT_NAMES[agent]
         where = "мой код" if path == ctx.project_dir else f"проект {path.name}"
-        if mode != "change":
+        if mode == "question":
             coder.start(agent, task, path, "question")
             return f"Задача принята. Запускаю {name} для ответа на вопрос; результат сообщу отдельно."
+
+        if mode == "publish":
+            coder.start(agent, task, path, "publish")
+            return f"Задача принята. Запускаю {name} для отправки зафиксированной ветки проекта {path.name} в GitHub; результат сообщу отдельно."
 
         task_id = ctx.tasks.create(short(task, 160), name)
 
@@ -288,7 +298,7 @@ def register(reg: ToolRegistry, ctx: ToolContext) -> None:
             if coder.busy:
                 ctx.tasks.update(task_id, "failed", "Агент уже занят")
                 raise ToolError("агент уже занят")
-            coder.start(agent, task, path, "change", task_id=task_id)
+            coder.start(agent, task, path, mode, task_id=task_id)
             return f"Задача принята. Запускаю {name}; фактический статус виден на экране, итог сообщу отдельно."
 
         return ctx.pending.request(

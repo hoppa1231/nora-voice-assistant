@@ -74,6 +74,13 @@ def test_coder_commands_limit_permissions(tmp_path):
     assert codex[codex.index("--sandbox") + 1] == "read-only"
 
 
+def test_coder_publish_command_allows_network_inside_workspace_only(tmp_path):
+    codex = command("codex", "git push", tmp_path, "publish", "brief", tmp_path / "o")
+    assert codex[codex.index("--sandbox") + 1] == "workspace-write"
+    assert "sandbox_workspace_write.network_access=true" in codex
+    assert "--dangerously-bypass-approvals-and-sandbox" not in codex
+
+
 class NoLlm:
     async def complete(self, *args, **kwargs):
         raise AssertionError("confirmation must not reach the LLM")
@@ -107,6 +114,20 @@ async def test_coder_change_waits_for_confirmation(tmp_path):
     assert result.text.endswith("Подтверди: скажи «да» или «нет».") and "blog" in result.text
     missing = await reg.call("ask_coder", '{"task": "x", "mode": "change", "project": "нету"}')
     assert missing.text.startswith("Ошибка: нет проекта") and "blog" in missing.text
+
+
+async def test_explicit_publish_request_starts_codex_without_reconfirmation(tmp_path, monkeypatch):
+    from voice_assistant.tools import coder as module
+
+    started = []
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(module.Coder, "start", lambda self, agent, task, project, mode, **kw: started.append((agent, task, mode)))
+    async with httpx.AsyncClient() as http:
+        ctx = ToolContext(Memory(":memory:"), http, MSK, "", project_dir=tmp_path)
+        reg = build_tools(ctx)
+    response = await reg.call("ask_coder", '{"task":"Пускай кодекс Сделает гитпуш твоего проекта на Githab","mode":"publish"}')
+    assert "отправки зафиксированной ветки" in response.text
+    assert started == [("codex", "Пускай кодекс Сделает гитпуш твоего проекта на Githab", "publish")]
 
 
 @pytest.mark.parametrize("text", ["Поставь таймер", "да"])
